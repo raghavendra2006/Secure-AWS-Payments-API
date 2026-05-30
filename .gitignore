@@ -1,0 +1,26 @@
+# Terraform state and backup files
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+*.tfvars
+*.tfvars.json
+override.tf
+override.tf.json
+_override.tf
+_override.tf.json
+.terraform/
+.terraform.lock.hcl
+
+# LocalStack data
+localstack_data/
+
+# Environment variables
+.env
+
+# Distribution zip files
+dist/
+
+# Python cache
+__pycache__/
+*.pyc

@@ -1,0 +1,5 @@
+{
+  "paymentId": "pay-123456",
+  "amount": 99.99,
+  "currency": "USD"
+}

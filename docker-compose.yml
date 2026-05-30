@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  localstack:
+    container_name: "localstack_fintech"
+    image: localstack/localstack:3.0.0
+    ports:
+      - "4566:4566"            # Main endpoint for all services
+    environment:
+      - SERVICES=s3,dynamodb,iam,kms,lambda # Specify services to enable
+      - DEBUG=1
+      - DATA_DIR=/tmp/localstack/data
+    volumes:
+      - "./localstack_data:/var/lib/localstack"
+      - "/var/run/docker.sock:/var/run/docker.sock"
