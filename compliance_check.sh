@@ -20,6 +20,10 @@ if [ -f .env ]; then
     export $(cat .env | sed 's/#.*//g' | xargs)
 fi
 
+# Default endpoint if not set (targets LocalStack)
+AWS_ENDPOINT_URL=${AWS_ENDPOINT_URL:-http://localhost:4566}
+export AWS_ENDPOINT_URL
+
 WORKSPACE=${1:-dev}
 BUCKET_NAME="fintech-payment-events-$WORKSPACE"
 TABLE_NAME="transactions-$WORKSPACE"
