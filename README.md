@@ -193,7 +193,7 @@ set AWS_DEFAULT_REGION=us-east-1
 set AWS_REQUEST_CHECKSUM_CALCULATION=when_required
 
 # Upload test payload
-aws --endpoint-url=http://localhost:4566 s3 cp test_payment.json s3://fintech-payment-events-dev/
+aws --endpoint-url=http://localhost:4566 s3 cp test_payment.json s3://fintech-payment-events-dev/test_payment.json
 
 # Wait ~10 seconds, then verify DynamoDB
 aws --endpoint-url=http://localhost:4566 dynamodb scan --table-name transactions-dev
@@ -207,10 +207,10 @@ aws --endpoint-url=http://localhost:4566 dynamodb scan --table-name transactions
             "Status": {"S": "PROCESSED"},
             "Bucket": {"S": "fintech-payment-events-dev"},
             "Amount": {"N": "99.99"},
-            "ObjectKey": {"S": "test_e2e_verify.json"},
+            "ObjectKey": {"S": "test_payment.json"},
             "PaymentID": {"S": "pay-123456"},
             "Timestamp": {"S": "2026-06-06T06:10:12.690725+00:00"},
-            "TransactionID": {"S": "test_e2e_verify.json-2026-06-06T06:10:12.690725+00:00"}
+            "TransactionID": {"S": "test_payment.json-2026-06-06T06:10:12.690725+00:00"}
         }
     ],
     "Count": 1,
