@@ -11,6 +11,22 @@ terraform {
   }
 }
 
+# ---------------------------------------------------------------------------
+# Local Values — Centralized naming and tagging strategy
+# ---------------------------------------------------------------------------
+locals {
+  environment = terraform.workspace
+  common_tags = {
+    Project     = "fintech-payments-api"
+    Environment = local.environment
+    ManagedBy   = "terraform"
+    Compliance  = "pci-dss"
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Provider Configuration — Targets LocalStack or real AWS
+# ---------------------------------------------------------------------------
 provider "aws" {
   region                      = var.aws_region
   access_key                  = var.use_localstack ? "test" : null
@@ -23,25 +39,47 @@ provider "aws" {
   dynamic "endpoints" {
     for_each = var.use_localstack ? [1] : []
     content {
-      s3       = "http://localhost:4566"
-      dynamodb = "http://localhost:4566"
-      iam      = "http://localhost:4566"
-      kms      = "http://localhost:4566"
-      lambda   = "http://localhost:4566"
+      s3       = var.localstack_endpoint
+      dynamodb = var.localstack_endpoint
+      iam      = var.localstack_endpoint
+      kms      = var.localstack_endpoint
+      lambda   = var.localstack_endpoint
     }
   }
 }
 
-# 1. KMS Key for Data Encryption
+# ===========================================================================
+# 1. KMS KEY — Customer-Managed Encryption Key (CMK)
+#    Provides envelope encryption for S3 and DynamoDB with automatic rotation.
+# ===========================================================================
 resource "aws_kms_key" "fintech_key" {
-  description             = "KMS key for fintech app data encryption"
+  description             = "Customer-managed KMS key for fintech payment data encryption"
   deletion_window_in_days = 7
   enable_key_rotation     = true
+  is_enabled              = true
+
+  tags = merge(local.common_tags, {
+    Name = "fintech-cmk-${local.environment}"
+  })
 }
 
-# 2. S3 Bucket for Payment Events
+resource "aws_kms_alias" "fintech_key_alias" {
+  name          = "alias/fintech-cmk-${local.environment}"
+  target_key_id = aws_kms_key.fintech_key.key_id
+}
+
+# ===========================================================================
+# 2. S3 BUCKET — Encrypted Payment Event Storage
+#    Versioned, KMS-encrypted, and fully blocked from public access.
+# ===========================================================================
 resource "aws_s3_bucket" "payment_events" {
-  bucket = "fintech-payment-events-${terraform.workspace}"
+  bucket        = "fintech-payment-events-${local.environment}"
+  force_destroy = var.use_localstack # Allow cleanup in local dev only
+
+  tags = merge(local.common_tags, {
+    Name      = "fintech-payment-events-${local.environment}"
+    DataClass = "confidential"
+  })
 }
 
 resource "aws_s3_bucket_versioning" "versioning_example" {
@@ -58,6 +96,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "encryption_config
       kms_master_key_id = aws_kms_key.fintech_key.arn
       sse_algorithm     = "aws:kms"
     }
+    bucket_key_enabled = true
   }
 }
 
@@ -69,9 +108,12 @@ resource "aws_s3_bucket_public_access_block" "pab" {
   restrict_public_buckets = true
 }
 
-# 3. DynamoDB Table for Transactions
+# ===========================================================================
+# 3. DYNAMODB TABLE — Encrypted Transaction Ledger
+#    PAY_PER_REQUEST billing, KMS encryption, point-in-time recovery enabled.
+# ===========================================================================
 resource "aws_dynamodb_table" "transactions" {
-  name         = "transactions-${terraform.workspace}"
+  name         = "transactions-${local.environment}"
   billing_mode = "PAY_PER_REQUEST"
   hash_key     = "TransactionID"
 
@@ -84,11 +126,27 @@ resource "aws_dynamodb_table" "transactions" {
     enabled     = true
     kms_key_arn = aws_kms_key.fintech_key.arn
   }
+
+  point_in_time_recovery {
+    enabled = true
+  }
+
+  tags = merge(local.common_tags, {
+    Name      = "transactions-${local.environment}"
+    DataClass = "confidential"
+  })
 }
 
-# 4. IAM Role and Policies for the Lambda Function
+# ===========================================================================
+# 4. IAM — Least-Privilege Lambda Execution Role & Policy
+#    Strictly scoped: NO wildcard actions on data services.
+# ===========================================================================
+
+# Trust policy: Only the Lambda service principal can assume this role
 data "aws_iam_policy_document" "lambda_assume_role_policy" {
   statement {
+    sid     = "AllowLambdaAssumeRole"
+    effect  = "Allow"
     actions = ["sts:AssumeRole"]
     principals {
       type        = "Service"
@@ -98,13 +156,20 @@ data "aws_iam_policy_document" "lambda_assume_role_policy" {
 }
 
 resource "aws_iam_role" "lambda_payment_processor_role" {
-  name               = "lambda-payment-processor-role-${terraform.workspace}"
+  name               = "lambda-payment-processor-role-${local.environment}"
   assume_role_policy = data.aws_iam_policy_document.lambda_assume_role_policy.json
+
+  tags = merge(local.common_tags, {
+    Name = "lambda-payment-processor-role-${local.environment}"
+  })
 }
 
+# Permissions policy: Each statement is scoped to the minimum required action+resource
 data "aws_iam_policy_document" "lambda_permissions" {
-  # CloudWatch Logs permissions
+  # CloudWatch Logs — required for Lambda observability
   statement {
+    sid    = "AllowCloudWatchLogs"
+    effect = "Allow"
     actions = [
       "logs:CreateLogGroup",
       "logs:CreateLogStream",
@@ -113,20 +178,26 @@ data "aws_iam_policy_document" "lambda_permissions" {
     resources = ["arn:aws:logs:*:*:*"]
   }
 
-  # S3 read permission for the specific bucket
+  # S3 — read-only access to the specific payment events bucket objects
   statement {
+    sid       = "AllowS3GetObject"
+    effect    = "Allow"
     actions   = ["s3:GetObject"]
     resources = ["${aws_s3_bucket.payment_events.arn}/*"]
   }
 
-  # DynamoDB write permission for the specific table
+  # DynamoDB — write-only access to the specific transactions table
   statement {
+    sid       = "AllowDynamoDBPutItem"
+    effect    = "Allow"
     actions   = ["dynamodb:PutItem"]
     resources = [aws_dynamodb_table.transactions.arn]
   }
 
-  # KMS permissions for decrypting files from S3 and writing encrypted data to DynamoDB
+  # KMS — decrypt and generate data keys for the specific CMK only
   statement {
+    sid    = "AllowKMSUsage"
+    effect = "Allow"
     actions = [
       "kms:Decrypt",
       "kms:GenerateDataKey"
@@ -136,8 +207,12 @@ data "aws_iam_policy_document" "lambda_permissions" {
 }
 
 resource "aws_iam_policy" "lambda_policy" {
-  name   = "lambda-payment-processor-policy-${terraform.workspace}"
+  name   = "lambda-payment-processor-policy-${local.environment}"
   policy = data.aws_iam_policy_document.lambda_permissions.json
+
+  tags = merge(local.common_tags, {
+    Name = "lambda-payment-processor-policy-${local.environment}"
+  })
 }
 
 resource "aws_iam_role_policy_attachment" "attach_lambda_policy" {
@@ -145,30 +220,51 @@ resource "aws_iam_role_policy_attachment" "attach_lambda_policy" {
   policy_arn = aws_iam_policy.lambda_policy.arn
 }
 
-# 5. Archive Lambda Function Code
+# ===========================================================================
+# 5. LAMBDA FUNCTION — Payment Event Processor
+#    Reads payment JSON from S3, writes transaction records to DynamoDB.
+# ===========================================================================
+
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_file = "${path.module}/src/process_payment.py"
   output_path = "${path.module}/dist/process_payment.zip"
 }
 
-# 6. Lambda Function
 resource "aws_lambda_function" "process_payment_lambda" {
-  function_name    = "process-payment-${terraform.workspace}"
+  function_name    = "process-payment-${local.environment}"
+  description      = "Processes payment events from S3 and writes transaction records to DynamoDB"
   handler          = "process_payment.handler"
   runtime          = "python3.9"
   role             = aws_iam_role.lambda_payment_processor_role.arn
   filename         = data.archive_file.lambda_zip.output_path
   source_code_hash = data.archive_file.lambda_zip.output_base64sha256
+  timeout          = 30
+  memory_size      = 128
 
   environment {
     variables = {
       DYNAMODB_TABLE_NAME = aws_dynamodb_table.transactions.name
     }
   }
+
+  tags = merge(local.common_tags, {
+    Name = "process-payment-${local.environment}"
+  })
 }
 
-# 7. S3 Bucket Trigger for Lambda Function
+# ===========================================================================
+# 6. S3 → LAMBDA TRIGGER — Event-Driven Invocation on Object Creation
+# ===========================================================================
+
+resource "aws_lambda_permission" "allow_s3" {
+  statement_id  = "AllowS3Invoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.process_payment_lambda.function_name
+  principal     = "s3.amazonaws.com"
+  source_arn    = aws_s3_bucket.payment_events.arn
+}
+
 resource "aws_s3_bucket_notification" "bucket_notification" {
   bucket = aws_s3_bucket.payment_events.id
 
@@ -178,12 +274,4 @@ resource "aws_s3_bucket_notification" "bucket_notification" {
   }
 
   depends_on = [aws_lambda_permission.allow_s3]
-}
-
-resource "aws_lambda_permission" "allow_s3" {
-  statement_id  = "AllowS3Invoke"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.process_payment_lambda.function_name
-  principal     = "s3.amazonaws.com"
-  source_arn    = aws_s3_bucket.payment_events.arn
 }
